@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://manthey1-crypto.github.io/disabled-comics-site/sitemap.xml
