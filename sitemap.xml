@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
+    <loc>https://manthey1-crypto.github.io/disabled-comics-site/</loc>
+    <lastmod>2026-09-09T00:59:10.112Z</lastmod>
+    <changefreq>weekly</changefreq>
+  </url>
+  <url>
     <loc>https://manthey1-crypto.github.io/disabled-comics-site/shop/</loc>
     <lastmod>2026-09-09T00:58:59.478Z</lastmod>
     <changefreq>weekly</changefreq>
@@ -8,11 +13,6 @@
   <url>
     <loc>https://manthey1-crypto.github.io/disabled-comics-site/mission/</loc>
     <lastmod>2026-09-09T00:58:46.979Z</lastmod>
-    <changefreq>weekly</changefreq>
-  </url>
-  <url>
-    <loc>https://manthey1-crypto.github.io/disabled-comics-site/</loc>
-    <lastmod>2026-09-09T00:58:33.754Z</lastmod>
     <changefreq>weekly</changefreq>
   </url>
 </urlset>
