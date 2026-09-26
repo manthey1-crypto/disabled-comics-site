@@ -249,17 +249,18 @@ async function handleCheckout(request, env, origin) {
 
   const stripeData = await stripeResponse.json();
 
-  if (!stripeResponse.ok) {
-    console.error("Stripe error:", stripeData);
+if (!stripeResponse.ok) {
+  console.error("Stripe error:", stripeData);
 
-    return json(
-      {
-        error: "Unable to create checkout session"
-      },
-      502,
-      origin
-    );
-  }
+  return json(
+    {
+      error: "Unable to create checkout session",
+      stripeError: stripeData
+    },
+    502,
+    origin
+  );
+}
 
   return json(
     {
