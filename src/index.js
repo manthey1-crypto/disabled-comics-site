@@ -169,6 +169,7 @@ async function handleCheckout(request, env, origin) {
   const stripeParams = new URLSearchParams();
 
   stripeParams.set("mode", "payment");
+  stripeParams.set("managed_payments[enabled]", "false");
   stripeParams.set("success_url", env.SUCCESS_URL);
   stripeParams.set("cancel_url", env.CANCEL_URL);
   stripeParams.set("billing_address_collection", "auto");
