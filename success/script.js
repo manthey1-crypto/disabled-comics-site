@@ -1,0 +1,1 @@
+const params=new URLSearchParams(window.location.search);const session=params.get('session_id');if(session){const ref=document.getElementById('orderRef');ref.textContent='Order reference: '+session;ref.style.display='block';}
