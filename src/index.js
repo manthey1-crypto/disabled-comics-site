@@ -1,7 +1,8 @@
 const ALLOWED_ORIGINS = [
   "https://disabled-comics-site.pages.dev",
   "https://disabledcomics.com",
-  "https://www.disabledcomics.com"
+  "https://www.disabledcomics.com",
+  "https://app.macknified.com"
 ];
 
 const PRODUCTS = {
