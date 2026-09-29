@@ -32,31 +32,15 @@ export default {
       if (url.pathname === "/health" && request.method === "GET") {
         return json({ ok: true, service: "disabled-comics-checkout" });
       }
-
-      if (url.pathname === "/checkout" && request.method === "POST") {
-        return handleCheckout(request, env, origin);
-      }
-
-      if (url.pathname === "/webhook" && request.method === "POST") {
-        return handleWebhook(request, env);
-      }
-
-      if (url.pathname === "/admin/orders" && request.method === "POST") {
-        return handleAdminOrders(request, env, origin);
-      }
-
-      if (url.pathname === "/admin/ship" && request.method === "POST") {
-        return handleMarkShipped(request, env, origin);
-      }
-
-      if (url.pathname === "/admin/refund" && request.method === "POST") {
-        return handleRefund(request, env, origin);
-      }
-
+      if (url.pathname === "/checkout" && request.method === "POST") return handleCheckout(request, env, origin);
+      if (url.pathname === "/webhook" && request.method === "POST") return handleWebhook(request, env);
+      if (url.pathname === "/admin/orders" && request.method === "POST") return handleAdminOrders(request, env, origin);
+      if (url.pathname === "/admin/ship" && request.method === "POST") return handleMarkShipped(request, env, origin);
+      if (url.pathname === "/admin/refund" && request.method === "POST") return handleRefund(request, env, origin);
       return json({ error: "Not found" }, 404, origin);
     } catch (err) {
       console.error(err);
-      return json({ error: "Server error", detail: err?.message || String(err) }, 500, origin);
+      return json({ error: err?.message || "Server error" }, err?.status || 500, origin);
     }
   }
 };
@@ -76,12 +60,10 @@ async function handleCheckout(request, env, origin) {
   stripeParams.set("allow_promotion_codes", "true");
 
   let needsShipping = false;
-
   items.forEach((item, index) => {
     const product = PRODUCTS[item.id];
     if (!product) throw new Error(`Unknown product: ${item.id}`);
     const quantity = Math.max(1, Math.min(20, parseInt(item.quantity || 1, 10)));
-
     stripeParams.set(`line_items[${index}][quantity]`, String(quantity));
     stripeParams.set(`line_items[${index}][price_data][currency]`, product.currency);
     stripeParams.set(`line_items[${index}][price_data][unit_amount]`, String(product.unit_amount));
@@ -95,10 +77,7 @@ async function handleCheckout(request, env, origin) {
   stripeParams.set("metadata[fulfillment_status]", "Paid");
 
   const stripeResponse = await stripePost("/v1/checkout/sessions", stripeParams, env);
-  if (!stripeResponse.ok) {
-    return json({ error: "Unable to create checkout session", stripeError: stripeResponse.data }, 502, origin);
-  }
-
+  if (!stripeResponse.ok) return json({ error: "Unable to create checkout session", stripeError: stripeResponse.data }, 502, origin);
   return json({ checkoutUrl: stripeResponse.data.url, sessionId: stripeResponse.data.id }, 200, origin);
 }
 
@@ -107,7 +86,6 @@ async function handleAdminOrders(request, env, origin) {
   requireAdmin(request, env);
   const body = await safeJson(request);
   const limit = Math.max(1, Math.min(50, Number(body.limit || 25)));
-
   const list = await stripeGet(`/v1/checkout/sessions?limit=${limit}`, env);
   if (!list.ok) return json({ error: "Unable to load orders", stripeError: list.data }, 502, origin);
 
@@ -120,10 +98,8 @@ async function handleAdminOrders(request, env, origin) {
       amountTotal: li.amount_total,
       currency: li.currency
     }));
-
     orders.push(normalizeOrder(session, items));
   }
-
   return json({ orders }, 200, origin);
 }
 
@@ -144,13 +120,7 @@ async function handleMarkShipped(request, env, origin) {
   const updated = await stripePost(`/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, params, env);
   if (!updated.ok) return json({ error: "Unable to mark shipped", stripeError: updated.data }, 502, origin);
 
-  const session = updated.data;
-  await appendLedger(session, env, {
-    fulfillmentStatus: "Shipped",
-    trackingNumber,
-    shippedAt: now
-  });
-
+  await appendLedger(updated.data, env, { fulfillmentStatus: "Shipped", trackingNumber, shippedAt: now });
   return json({ ok: true, fulfillmentStatus: "Shipped", trackingNumber, shippedAt: now }, 200, origin);
 }
 
@@ -183,19 +153,8 @@ async function handleRefund(request, env, origin) {
   meta.set("metadata[refunded_at]", now);
   await stripePost(`/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, meta, env);
 
-  session.metadata = {
-    ...(session.metadata || {}),
-    refund_status: refund.data.status || "succeeded",
-    refund_id: refund.data.id,
-    refunded_at: now
-  };
-
-  await appendLedger(session, env, {
-    refundStatus: refund.data.status || "succeeded",
-    refundId: refund.data.id,
-    refundedAt: now
-  });
-
+  session.metadata = { ...(session.metadata || {}), refund_status: refund.data.status || "succeeded", refund_id: refund.data.id, refunded_at: now };
+  await appendLedger(session, env, { refundStatus: refund.data.status || "succeeded", refundId: refund.data.id, refundedAt: now });
   return json({ ok: true, refundId: refund.data.id, status: refund.data.status, amount: refund.data.amount, currency: refund.data.currency }, 200, origin);
 }
 
@@ -203,12 +162,10 @@ async function handleWebhook(request, env) {
   const rawBody = await request.text();
   const signatureHeader = request.headers.get("Stripe-Signature");
   if (!signatureHeader) return new Response("Missing Stripe-Signature", { status: 400 });
-
   const valid = await verifyStripeSignature(rawBody, signatureHeader, env.STRIPE_WEBHOOK_SECRET);
   if (!valid) return new Response("Invalid signature", { status: 400 });
 
   const event = JSON.parse(rawBody);
-
   if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
     const session = event.data.object;
     const lines = await stripeGet(`/v1/checkout/sessions/${encodeURIComponent(session.id)}/line_items?limit=100`, env);
@@ -218,11 +175,9 @@ async function handleWebhook(request, env) {
       fulfillmentStatus: session.metadata?.fulfillment_status || "Paid"
     });
   }
-
   if (event.type === "checkout.session.async_payment_failed") {
     await appendLedger(event.data.object, env, { paymentStatus: "failed", fulfillmentStatus: "Payment Failed" });
   }
-
   return new Response("ok", { status: 200 });
 }
 
@@ -238,14 +193,7 @@ function normalizeOrder(session, items) {
     customerName: name,
     email: c.email || session.customer_email || "",
     phone: c.phone || "",
-    address: {
-      line1: a.line1 || "",
-      line2: a.line2 || "",
-      city: a.city || "",
-      state: a.state || "",
-      postalCode: a.postal_code || "",
-      country: a.country || ""
-    },
+    address: { line1: a.line1 || "", line2: a.line2 || "", city: a.city || "", state: a.state || "", postalCode: a.postal_code || "", country: a.country || "" },
     amountTotal: session.amount_total || 0,
     currency: session.currency || "usd",
     paymentStatus: session.payment_status || "",
@@ -268,11 +216,8 @@ async function appendLedger(session, env, overrides = {}) {
     const email = c.email || session.customer_email || "unknown@disabledcomics.local";
     const phone = c.phone || "0000000000";
     const meta = session.metadata || {};
-    const rowId = session.id;
-    const payload = {
-      contactName: name,
-      contactEmail: email,
-      contactPhone: phone,
+
+    const data = {
       OrderID: meta.order_id || session.id,
       SessionID: session.id,
       PaymentIntentID: typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id || "",
@@ -296,10 +241,11 @@ async function appendLedger(session, env, overrides = {}) {
       RefundID: overrides.refundId ?? meta.refund_id ?? "",
       RefundedAt: overrides.refundedAt ?? meta.refunded_at ?? "",
       Notes: "",
-      RowID: rowId,
+      RowID: session.id,
       UpdatedAt: new Date().toISOString()
     };
 
+    const payload = { contactName: name, contactEmail: email, contactPhone: phone, data };
     const res = await fetch(env.ORDER_LEDGER_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -316,30 +262,25 @@ function formatItems(lines) {
 }
 
 async function stripeGet(path, env) {
-  const res = await fetch(`https://api.stripe.com${path}`, {
-    headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` }
-  });
+  const res = await fetch(`https://api.stripe.com${path}`, { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } });
   const data = await res.json();
   return { ok: res.ok, status: res.status, data };
 }
 
 async function stripePost(path, params, env, idempotencyKey = null) {
-  const headers = {
-    Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
-    "Content-Type": "application/x-www-form-urlencoded"
-  };
+  const headers = { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" };
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
-  const res = await fetch(`https://api.stripe.com${path}`, {
-    method: "POST",
-    headers,
-    body: params.toString()
-  });
+  const res = await fetch(`https://api.stripe.com${path}`, { method: "POST", headers, body: params.toString() });
   const data = await res.json();
   return { ok: res.ok, status: res.status, data };
 }
 
 function requireAdmin(request, env) {
-  if (!env.REFUND_ADMIN_KEY) throw new Error("REFUND_ADMIN_KEY is not configured");
+  if (!env.REFUND_ADMIN_KEY) {
+    const err = new Error("REFUND_ADMIN_KEY is not configured");
+    err.status = 500;
+    throw err;
+  }
   const supplied = request.headers.get("X-Admin-Key") || "";
   if (!timingSafeEqual(supplied, env.REFUND_ADMIN_KEY)) {
     const err = new Error("Unauthorized");
@@ -365,7 +306,6 @@ async function verifyStripeSignature(payload, header, secret) {
   const timestamp = parts.find(part => part.startsWith("t="))?.substring(2);
   const signatures = parts.filter(part => part.startsWith("v1=")).map(part => part.substring(3));
   if (!timestamp || !signatures.length) return false;
-
   const timestampNumber = Number(timestamp);
   if (Math.abs(Math.floor(Date.now() / 1000) - timestampNumber) > 300) return false;
 
