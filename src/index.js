@@ -98,7 +98,31 @@ async function handleAdminOrders(request, env, origin) {
       amountTotal: li.amount_total,
       currency: li.currency
     }));
-    orders.push(normalizeOrder(session, items));
+
+    const paymentIntentId = typeof session.payment_intent === "string"
+      ? session.payment_intent
+      : session.payment_intent?.id || "";
+
+    let refundInfo = null;
+    if (paymentIntentId) {
+      const refundRes = await stripeGet(`/v1/refunds?payment_intent=${encodeURIComponent(paymentIntentId)}&limit=100`, env);
+      if (refundRes.ok) {
+        const successfulRefunds = (refundRes.data.data || []).filter(r => r.status === "succeeded");
+        const refundedAmount = successfulRefunds.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+        const latestRefund = successfulRefunds.sort((a, b) => (b.created || 0) - (a.created || 0))[0] || null;
+
+        if (refundedAmount > 0) {
+          refundInfo = {
+            status: refundedAmount >= Number(session.amount_total || 0) ? "Refunded" : "Partially Refunded",
+            amount: refundedAmount,
+            id: latestRefund?.id || "",
+            refundedAt: latestRefund?.created ? new Date(latestRefund.created * 1000).toISOString() : ""
+          };
+        }
+      }
+    }
+
+    orders.push(normalizeOrder(session, items, refundInfo));
   }
   return json({ orders }, 200, origin);
 }
@@ -153,15 +177,33 @@ async function handleRefund(request, env, origin) {
   meta.set("metadata[refunded_at]", now);
   await stripePost(`/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, meta, env);
 
-  session.metadata = { ...(session.metadata || {}), refund_status: refund.data.status || "succeeded", refund_id: refund.data.id, refunded_at: now };
-  await appendLedger(session, env, { refundStatus: refund.data.status || "succeeded", refundId: refund.data.id, refundedAt: now });
-  return json({ ok: true, refundId: refund.data.id, status: refund.data.status, amount: refund.data.amount, currency: refund.data.currency }, 200, origin);
+  session.metadata = {
+    ...(session.metadata || {}),
+    refund_status: refund.data.status || "succeeded",
+    refund_id: refund.data.id,
+    refunded_at: now
+  };
+
+  await appendLedger(session, env, {
+    refundStatus: refund.data.status || "succeeded",
+    refundId: refund.data.id,
+    refundedAt: now
+  });
+
+  return json({
+    ok: true,
+    refundId: refund.data.id,
+    status: refund.data.status,
+    amount: refund.data.amount,
+    currency: refund.data.currency
+  }, 200, origin);
 }
 
 async function handleWebhook(request, env) {
   const rawBody = await request.text();
   const signatureHeader = request.headers.get("Stripe-Signature");
   if (!signatureHeader) return new Response("Missing Stripe-Signature", { status: 400 });
+
   const valid = await verifyStripeSignature(rawBody, signatureHeader, env.STRIPE_WEBHOOK_SECRET);
   if (!valid) return new Response("Invalid signature", { status: 400 });
 
@@ -175,16 +217,22 @@ async function handleWebhook(request, env) {
       fulfillmentStatus: session.metadata?.fulfillment_status || "Paid"
     });
   }
+
   if (event.type === "checkout.session.async_payment_failed") {
-    await appendLedger(event.data.object, env, { paymentStatus: "failed", fulfillmentStatus: "Payment Failed" });
+    await appendLedger(event.data.object, env, {
+      paymentStatus: "failed",
+      fulfillmentStatus: "Payment Failed"
+    });
   }
+
   return new Response("ok", { status: 200 });
 }
 
-function normalizeOrder(session, items) {
+function normalizeOrder(session, items, refundInfo = null) {
   const c = session.customer_details || {};
   const a = session.shipping_details?.address || c.address || {};
   const name = session.shipping_details?.name || c.name || "";
+
   return {
     orderId: session.metadata?.order_id || session.id,
     sessionId: session.id,
@@ -193,22 +241,31 @@ function normalizeOrder(session, items) {
     customerName: name,
     email: c.email || session.customer_email || "",
     phone: c.phone || "",
-    address: { line1: a.line1 || "", line2: a.line2 || "", city: a.city || "", state: a.state || "", postalCode: a.postal_code || "", country: a.country || "" },
+    address: {
+      line1: a.line1 || "",
+      line2: a.line2 || "",
+      city: a.city || "",
+      state: a.state || "",
+      postalCode: a.postal_code || "",
+      country: a.country || ""
+    },
     amountTotal: session.amount_total || 0,
     currency: session.currency || "usd",
     paymentStatus: session.payment_status || "",
     fulfillmentStatus: session.metadata?.fulfillment_status || (session.payment_status === "paid" ? "Paid" : "Pending"),
     trackingNumber: session.metadata?.tracking_number || "",
     shippedAt: session.metadata?.shipped_at || "",
-    refundStatus: session.metadata?.refund_status || "Not Refunded",
-    refundId: session.metadata?.refund_id || "",
-    refundedAt: session.metadata?.refunded_at || "",
+    refundStatus: refundInfo?.status || session.metadata?.refund_status || "Not Refunded",
+    refundAmount: refundInfo?.amount || 0,
+    refundId: refundInfo?.id || session.metadata?.refund_id || "",
+    refundedAt: refundInfo?.refundedAt || session.metadata?.refunded_at || "",
     items
   };
 }
 
 async function appendLedger(session, env, overrides = {}) {
   if (!env.ORDER_LEDGER_WEBHOOK_URL) return;
+
   try {
     const c = session.customer_details || {};
     const a = session.shipping_details?.address || c.address || {};
@@ -251,6 +308,7 @@ async function appendLedger(session, env, overrides = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
+
     if (!res.ok) console.error("Order ledger webhook failed", res.status, await res.text());
   } catch (err) {
     console.error("Order ledger error", err);
@@ -262,15 +320,25 @@ function formatItems(lines) {
 }
 
 async function stripeGet(path, env) {
-  const res = await fetch(`https://api.stripe.com${path}`, { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } });
+  const res = await fetch(`https://api.stripe.com${path}`, {
+    headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` }
+  });
   const data = await res.json();
   return { ok: res.ok, status: res.status, data };
 }
 
 async function stripePost(path, params, env, idempotencyKey = null) {
-  const headers = { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" };
+  const headers = {
+    Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+    "Content-Type": "application/x-www-form-urlencoded"
+  };
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
-  const res = await fetch(`https://api.stripe.com${path}`, { method: "POST", headers, body: params.toString() });
+
+  const res = await fetch(`https://api.stripe.com${path}`, {
+    method: "POST",
+    headers,
+    body: params.toString()
+  });
   const data = await res.json();
   return { ok: res.ok, status: res.status, data };
 }
@@ -281,6 +349,7 @@ function requireAdmin(request, env) {
     err.status = 500;
     throw err;
   }
+
   const supplied = request.headers.get("X-Admin-Key") || "";
   if (!timingSafeEqual(supplied, env.REFUND_ADMIN_KEY)) {
     const err = new Error("Unauthorized");
@@ -298,7 +367,11 @@ function enforceOrigin(origin) {
 }
 
 async function safeJson(request) {
-  try { return await request.json(); } catch { return {}; }
+  try {
+    return await request.json();
+  } catch {
+    return {};
+  }
 }
 
 async function verifyStripeSignature(payload, header, secret) {
@@ -306,13 +379,29 @@ async function verifyStripeSignature(payload, header, secret) {
   const timestamp = parts.find(part => part.startsWith("t="))?.substring(2);
   const signatures = parts.filter(part => part.startsWith("v1=")).map(part => part.substring(3));
   if (!timestamp || !signatures.length) return false;
+
   const timestampNumber = Number(timestamp);
   if (Math.abs(Math.floor(Date.now() / 1000) - timestampNumber) > 300) return false;
 
   const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`${timestamp}.${payload}`));
-  const expectedSignature = Array.from(new Uint8Array(signature)).map(byte => byte.toString(16).padStart(2, "0")).join("");
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(`${timestamp}.${payload}`)
+  );
+
+  const expectedSignature = Array.from(new Uint8Array(signature))
+    .map(byte => byte.toString(16).padStart(2, "0"))
+    .join("");
+
   return signatures.some(value => timingSafeEqual(value, expectedSignature));
 }
 
@@ -321,12 +410,15 @@ function timingSafeEqual(a, b) {
   b = String(b || "");
   const len = Math.max(a.length, b.length);
   let result = a.length ^ b.length;
-  for (let i = 0; i < len; i++) result |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  for (let i = 0; i < len; i++) {
+    result |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
   return result === 0;
 }
 
 function handleOptions(origin) {
   if (!ALLOWED_ORIGINS.includes(origin)) return new Response(null, { status: 403 });
+
   return new Response(null, {
     status: 204,
     headers: {
@@ -339,10 +431,15 @@ function handleOptions(origin) {
 }
 
 function json(data, status = 200, origin = null) {
-  const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
+  const headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store"
+  };
+
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     headers["Access-Control-Allow-Origin"] = origin;
     headers["Vary"] = "Origin";
   }
+
   return new Response(JSON.stringify(data), { status, headers });
 }
