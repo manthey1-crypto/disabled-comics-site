@@ -91,6 +91,8 @@ async function handleAdminOrders(request, env, origin) {
 
   const orders = [];
   for (const session of list.data.data || []) {
+    if (session.payment_status !== "paid") continue;
+
     const lines = await stripeGet(`/v1/checkout/sessions/${encodeURIComponent(session.id)}/line_items?limit=100`, env);
     const items = (lines.ok ? lines.data.data : []).map(li => ({
       description: li.description,
